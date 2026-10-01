@@ -1,0 +1,26 @@
+{
+  "id": "./",
+  "name": "EL SHADDAI · Gestión",
+  "short_name": "EL SHADDAI",
+  "description": "Gestión del negocio de indumentaria masculina",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#111210",
+  "theme_color": "#111210",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

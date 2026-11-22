@@ -160,7 +160,7 @@ function renderMovements(){if(!document.getElementById('movementsTable'))return;
 migrateReceivables();render();
 </script><script>
 const CLOUD_URL='https://yezqyvksayrehivzvxqn.supabase.co',CLOUD_KEY='sb_publishable_ow6ZF5M21-IZ0FgPRqIktA_bUUNlONq';
-let cloudClient=null,cloudVersion=null,cloudActive=false,cloudDirty=false,cloudTimer=null,cloudUser=null,cloudSnapshot=null,cloudSaving=false,cloudPolling=null;
+let cloudClient=null,cloudVersion=null,cloudActive=false,cloudDirty=false,cloudTimer=null,cloudUser=null,cloudSnapshot=null,cloudSaving=false,cloudLoading=false,cloudPolling=null;
 function cloudStatus(t,on=false){let b=document.getElementById('accountButton');if(b){b.textContent=t;b.classList.toggle('connected',on)}}
 function accountBody(h,t){document.getElementById('accountTitle').textContent=t||'Sincronizar dispositivos';document.getElementById('accountBody').innerHTML=h;document.getElementById('accountModal').classList.add('show')}
 function closeAccount(){document.getElementById('accountModal').classList.remove('show')}
@@ -185,55 +185,94 @@ function showPasswordRecovery(){
 }
 async function createAccount(){let form=document.getElementById('loginForm');if(!form.reportValidity())return;let f=new FormData(form);setAuthMessage('Creando la cuenta…');let {data,error}=await cloudClient.auth.signUp({email:String(f.get('email')).trim(),password:String(f.get('password')),options:{emailRedirectTo:location.origin+location.pathname}});if(error){let m=error.message||'';setAuthMessage(/rate limit|too many requests/i.test(m)?'Se enviaron muchos correos en poco tiempo. Esperá unos minutos y probá de nuevo.':m);return}if(!data.session){setAuthMessage('Cuenta creada. Confirmá el correo recibido y luego ingresá desde aquí.');return}cloudUser=data.user;closeAccount();await loadCloudForUser()}
 async function readCloud(){const controller=new AbortController();let timer;try{let q=cloudClient.from('el_shaddai_store').select('payload,updated_at').eq('user_id',cloudUser.id);if(typeof q.abortSignal==='function')q=q.abortSignal(controller.signal);const request=q.maybeSingle();const timeout=new Promise(resolve=>{timer=setTimeout(()=>{controller.abort();resolve({data:null,error:{message:'TIMEOUT_CLOUD'}})},12000)});return await Promise.race([request,timeout])}catch(error){return {data:null,error}}finally{clearTimeout(timer)}}
-function usePayload(p,v){let x=p||{};data={products:x.products||[],sales:x.sales||[],moves:x.moves||[],contacts:x.contacts||[],orders:x.orders||[]};localStorage.setItem(KEY,JSON.stringify(data));cloudVersion=v;cloudDirty=false;cloudActive=true;render();cloudStatus('Sincronizado',true)}
-async function loadCloudForUser(){if(!cloudUser)return;cloudStatus('Conectando…');let {data:row,error}=await readCloud();if(error){cloudActive=false;cloudStatus('Error de conexión');accountBody('<p class="account-note">No se pudo leer la información compartida. Volvé a intentar cuando tengas conexión.</p>','Sincronización');return}cloudSnapshot=row;if(!row){cloudVersion=null;cloudActive=false;cloudStatus('Elegir datos');if(localHasRecords())accountBody('<p class="account-note">La cuenta está vacía. Este dispositivo tiene registros locales. Elegí si querés subirlos a la nube. No se enviará nada hasta que toques el botón.</p><div class="account-actions"><button class="btn" onclick="closeAccount()">Dejar para después</button><button class="btn primary" onclick="uploadLocal()">Subir datos de este dispositivo</button></div>','Preparar información');else accountBody('<p class="account-note">La cuenta está vacía y este dispositivo no tiene registros.</p><div class="account-actions"><button class="btn" onclick="closeAccount()">Ahora no</button><button class="btn primary" onclick="startEmpty()">Empezar sin datos</button></div>','Preparar información');return}
- if(!localHasRecords()){usePayload(row.payload,row.updated_at);closeAccount();return}if(JSON.stringify(data)===JSON.stringify(row.payload)){usePayload(row.payload,row.updated_at);closeAccount();return}
- cloudActive=false;cloudStatus('Elegir datos');accountBody('<p class="account-note">Hay información en la nube y también en este dispositivo. Elegí qué copia será la compartida.</p><div class="account-status">Usar la nube guarda primero una copia de recuperación local. Subir este dispositivo reemplazará la copia compartida.</div><div class="account-actions"><button class="btn" onclick="closeAccount()">Decidir después</button><button class="btn" onclick="useCloud()">Usar datos de la nube</button><button class="btn primary" onclick="uploadLocal()">Subir datos locales</button></div>','Elegir información')}
-function useCloud(){const row=cloudSnapshot;if(!row||!row.payload){cloudStatus('Revisar sincronización');accountBody('<p class="account-note">No hay una copia de la nube disponible en esta pantalla. Tus datos locales siguen intactos. Volvé a consultar la cuenta para cargar la copia compartida.</p><div class="account-actions"><button class="btn" onclick="closeAccount()">Cerrar</button><button class="btn primary" onclick="loadCloudForUser()">Volver a consultar</button></div>','Copia no disponible');return}localStorage.setItem(KEY+'-recuperacion-'+Date.now(),JSON.stringify(data));usePayload(row.payload,row.updated_at);closeAccount();toast('Datos de la nube cargados')}
+function normalizeCloudPayload(p){let x=p||{};return{products:Array.isArray(x.products)?x.products:[],sales:Array.isArray(x.sales)?x.sales:[],moves:Array.isArray(x.moves)?x.moves:[],contacts:Array.isArray(x.contacts)?x.contacts:[],orders:Array.isArray(x.orders)?x.orders:[]}}
+function stableCloudValue(v){if(Array.isArray(v))return v.map(stableCloudValue);if(v&&typeof v==='object')return Object.fromEntries(Object.keys(v).sort().map(k=>[k,stableCloudValue(v[k])]));return v}
+function cloudEqual(a,b){const x=normalizeCloudPayload(a),y=normalizeCloudPayload(b),keys=['products','sales','moves','contacts','orders'];return keys.every(k=>{const ax=x[k].slice().sort((m,n)=>String(m.id||'').localeCompare(String(n.id||''))),by=y[k].slice().sort((m,n)=>String(m.id||'').localeCompare(String(n.id||'')));return JSON.stringify(stableCloudValue(ax))===JSON.stringify(stableCloudValue(by))})}
+function cloudBaseKey(){return KEY+'-syncbase-'+(cloudUser?.id||'')}
+function readCloudBase(){try{return JSON.parse(localStorage.getItem(cloudBaseKey())||'null')}catch{return null}}
+function saveCloudBase(p,v){if(!cloudUser)return;try{const x=normalizeCloudPayload(p),compact={...x,products:x.products.map(({image,...rest})=>rest)};localStorage.setItem(cloudBaseKey(),JSON.stringify({payload:compact,updated_at:v,user_id:cloudUser.id}))}catch{}}
+function saveRecoveryCopy(label,p){const key=KEY+'-recuperacion-'+label;try{localStorage.setItem(key,JSON.stringify(p));return true}catch{try{const strip=value=>Array.isArray(value)?value.map(strip):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).filter(([name])=>name!=='image').map(([name,item])=>[name,strip(item)])):value;localStorage.setItem(key,JSON.stringify(strip(p)));return true}catch{return false}}}
+function usePayload(p,v){const x=normalizeCloudPayload(p);data=x;localStorage.setItem(KEY,JSON.stringify(data));cloudVersion=v;cloudSnapshot={payload:JSON.parse(JSON.stringify(data)),updated_at:v};cloudDirty=false;cloudActive=true;saveCloudBase(data,v);render();cloudStatus('Sincronizado',true)}
+async function loadCloudForUser(){
+ if(!cloudUser||cloudLoading)return;cloudLoading=true;cloudStatus('Conectando…');
+ try{
+  let {data:row,error}=await readCloud();
+  if(error){cloudActive=false;cloudDirty=localHasRecords();cloudStatus('Pendiente de conexión');scheduleCloudSave(15000);return}
+  if(!row){cloudSnapshot=null;cloudVersion=null;cloudActive=true;cloudDirty=true;closeAccount();scheduleCloudSave(200);return}
+  const remote=normalizeCloudPayload(row.payload),local=normalizeCloudPayload(data);cloudSnapshot=row;cloudVersion=row.updated_at;
+  if(!localHasRecords(local)||cloudEqual(local,remote)){usePayload(remote,row.updated_at);closeAccount();return}
+  const localBackup=saveRecoveryCopy('local',local),cloudBackup=saveRecoveryCopy('nube',remote);
+  if(!localBackup||!cloudBackup){cloudActive=false;cloudStatus('Revisar copias');accountBody('<p class="account-note">Encontré datos distintos en la notebook y en la nube, pero no hay espacio suficiente para guardar copias de recuperación en este dispositivo. No reemplacé ninguna de las dos copias.</p><div class="account-actions"><button class="btn" onclick="closeAccount()">Dejar así</button><button class="btn" onclick="useCloud()">Usar datos de la nube</button><button class="btn primary" onclick="uploadLocal()">Subir datos locales</button></div>','Conservar información');return}
+  const base=readCloudBase()?.payload||{};data=mergeCloudPayload(base,local,remote);localStorage.setItem(KEY,JSON.stringify(data));cloudSnapshot=row;cloudVersion=row.updated_at;cloudActive=true;cloudDirty=!cloudEqual(data,remote);render();closeAccount();
+  if(cloudDirty){cloudStatus('Combinando dispositivos…');scheduleCloudSave(150)}else{saveCloudBase(remote,row.updated_at);cloudStatus('Sincronizado',true)}
+ }catch(error){cloudActive=false;cloudDirty=localHasRecords();cloudStatus('Pendiente de conexión');scheduleCloudSave(15000)}
+ finally{cloudLoading=false}
+}
+function useCloud(){const row=cloudSnapshot;if(!row||!row.payload){loadCloudForUser();return}saveRecoveryCopy('local',data);usePayload(row.payload,row.updated_at);closeAccount();toast('Datos de la nube cargados')}
 async function uploadLocal(){if(!cloudUser)return;cloudVersion=cloudSnapshot?.updated_at||null;cloudActive=true;cloudDirty=true;closeAccount();await saveCloud()}
-async function startEmpty(){data={products:[],sales:[],moves:[],contacts:[],orders:[]};cloudVersion=null;cloudActive=true;cloudDirty=true;closeAccount();render();await saveCloud()}
-function queueCloudSave(){if(!cloudActive||!cloudUser)return;cloudDirty=true;clearTimeout(cloudTimer);cloudStatus('Guardando…');cloudTimer=setTimeout(saveCloud,900)}
-async function uploadLocalAgainstLatest(){if(!cloudUser)return;cloudStatus('Revisando nube…');let {data:latest,error}=await readCloud();if(error){cloudStatus('Sin conexión');accountBody('<p class="account-note">No pude revisar la nube. Tus datos locales siguen guardados; volvé a intentarlo con conexión.</p><div class="account-actions"><button class="btn" onclick="closeAccount()">Cerrar</button><button class="btn primary" onclick="uploadLocalAgainstLatest()">Volver a intentar</button></div>','Sin conexión');return}cloudSnapshot=latest;cloudVersion=latest?.updated_at||null;cloudActive=true;cloudDirty=true;closeAccount();await saveCloud()}
+async function startEmpty(){data={products:[],sales:[],moves:[],contacts:[],orders:[]};cloudVersion=null;cloudSnapshot=null;cloudActive=true;cloudDirty=true;closeAccount();render();await saveCloud()}
+function scheduleCloudSave(delay=900){clearTimeout(cloudTimer);cloudTimer=setTimeout(()=>{cloudTimer=null;if(cloudActive)saveCloud();else if(cloudUser)loadCloudForUser()},delay)}
+function queueCloudSave(){if(!cloudUser)return;cloudDirty=true;if(!cloudActive){cloudStatus('Pendiente de sincronizar');if(!cloudLoading)scheduleCloudSave(1000);return}cloudStatus('Guardando…');scheduleCloudSave(900)}
+async function uploadLocalAgainstLatest(){if(!cloudUser)return;cloudStatus('Revisando nube…');let {data:latest,error}=await readCloud();if(error){cloudStatus('Pendiente de conexión');scheduleCloudSave(5000);return}cloudSnapshot=latest;cloudVersion=latest?.updated_at||null;cloudActive=true;cloudDirty=true;closeAccount();await saveCloud()}
 function mergeCloudPayload(base,local,remote){
  const keys=['products','sales','moves','contacts','orders'],out={};
- const eq=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
+ const stable=v=>JSON.stringify(stableCloudValue(v));
  function mergeRecord(b,l,r,key){
-  if(eq(l,b))return r;if(eq(r,b))return l;
+  if(stable(l)===stable(b))return r;if(stable(r)===stable(b))return l;
   if(l==null||r==null)return l==null?r:l;
   if(typeof l!=='object'||typeof r!=='object'||Array.isArray(l)||Array.isArray(r))return l;
   let z={...r};
   for(const k of new Set([...Object.keys(b||{}),...Object.keys(l),...Object.keys(r)])){
    const bv=b?.[k],lv=l[k],rv=r[k];
-   if(eq(lv,bv)) {if(rv===undefined)delete z[k];else z[k]=rv;continue}
-   if(eq(rv,bv)) {if(lv===undefined)delete z[k];else z[k]=lv;continue}
-   if(k==='stock'&&key==='products'&&Number.isFinite(Number(lv))&&Number.isFinite(Number(rv))&&Number.isFinite(Number(bv)))z[k]=Number(bv)+(Number(lv)-Number(bv))+(Number(rv)-Number(bv));
+   if(stable(lv)===stable(bv)){if(rv===undefined)delete z[k];else z[k]=rv;continue}
+   if(stable(rv)===stable(bv)){if(lv===undefined)delete z[k];else z[k]=lv;continue}
+   if(k==='payments'&&Array.isArray(lv)&&Array.isArray(rv)){const seen=new Map();for(const item of [...(Array.isArray(bv)?bv:[]),...lv,...rv]){const key=item?.id!=null?'id:'+item.id:stable(item);seen.set(key,item)}z[k]=[...seen.values()]}
+   else if(k==='installments'&&Array.isArray(lv)&&Array.isArray(rv)&&lv.length===rv.length&&(!Array.isArray(bv)||bv.length===lv.length))z[k]=lv.map((item,i)=>mergeRecord(bv?.[i],item,rv[i],key));
+   else if(k==='stock'&&key==='products'&&Number.isFinite(Number(lv))&&Number.isFinite(Number(rv))&&Number.isFinite(Number(bv)))z[k]=Number(bv)+(Number(lv)-Number(bv))+(Number(rv)-Number(bv));
+   else if((k==='paidAmount'||k==='balance')&&key==='sales'&&Number.isFinite(Number(lv))&&Number.isFinite(Number(rv))&&Number.isFinite(Number(bv)))z[k]=Number(bv)+(Number(lv)-Number(bv))+(Number(rv)-Number(bv));
+   else if(k==='image'&&(!lv||!String(lv).trim()))z[k]=rv||'';
    else if(lv===undefined||rv===undefined)z[k]=lv===undefined?rv:lv;
    else if(lv&&rv&&typeof lv==='object'&&typeof rv==='object'&&!Array.isArray(lv)&&!Array.isArray(rv))z[k]=mergeRecord(bv||{},lv,rv,key);
    else z[k]=lv;
-  }return z;
+  }
+  if(key==='sales'&&Number.isFinite(Number(z.total))&&Number.isFinite(Number(z.paidAmount)))z.balance=Math.max(0,Number((Number(z.total)-Number(z.paidAmount)).toFixed(2)));
+  return z;
  }
- for(const k of keys){
-  const bm=new Map((base?.[k]||[]).map(x=>[String(x.id),x])),lm=new Map((local?.[k]||[]).map(x=>[String(x.id),x])),rm=new Map((remote?.[k]||[]).map(x=>[String(x.id),x])),ids=new Set([...bm.keys(),...lm.keys(),...rm.keys()]);
-  out[k]=[];for(const id of ids){const x=mergeRecord(bm.get(id),lm.get(id),rm.get(id),k);if(x!=null)out[k].push(x)}
- }
+ for(const k of keys){const idOf=x=>String(x?.id??JSON.stringify(x)),bm=new Map((base?.[k]||[]).map(x=>[idOf(x),x])),lm=new Map((local?.[k]||[]).map(x=>[idOf(x),x])),rm=new Map((remote?.[k]||[]).map(x=>[idOf(x),x])),ids=new Set([...bm.keys(),...lm.keys(),...rm.keys()]);out[k]=[];for(const id of ids){const item=mergeRecord(bm.get(id),lm.get(id),rm.get(id),k);if(item!=null)out[k].push(item)}}
  return out;
 }
-async function saveCloud(){if(!cloudActive||!cloudUser||cloudSaving)return;clearTimeout(cloudTimer);cloudSaving=true;let tries=0;
- try{while(tries<3&&cloudActive&&cloudUser){const body=JSON.parse(JSON.stringify(data)),expected=cloudVersion;cloudStatus('Guardando…');let {data:v,error}=await cloudClient.rpc('save_el_shaddai_data',{p_payload:body,p_expected_updated_at:expected});
-  if(error&&String(error.message||'').includes('SYNC_CONFLICT')){let {data:latest,error:readError}=await readCloud();if(readError)throw readError;const base=cloudSnapshot?.payload||{},merged=mergeCloudPayload(base,data,latest?.payload||{});data=merged;localStorage.setItem(KEY,JSON.stringify(data));cloudSnapshot=latest;cloudVersion=latest?.updated_at||null;cloudDirty=true;render();tries++;continue}
-  if(error)throw error;
-  cloudVersion=v;cloudSnapshot={payload:body,updated_at:v};cloudDirty=JSON.stringify(data)!==JSON.stringify(body);cloudStatus('Sincronizado',true);if(cloudDirty){cloudTimer=setTimeout(saveCloud,500)}return;
- }
- }catch(error){cloudDirty=true;cloudStatus('Revisar sincronización');accountBody('<p class="account-note">No se pudo completar la sincronización. Tus datos siguen guardados en este dispositivo y se volverá a intentar con conexión.</p><div class="account-actions"><button class="btn" onclick="closeAccount()">Cerrar</button><button class="btn" onclick="refreshCloud()">Revisar nube</button><button class="btn primary" onclick="uploadLocalAgainstLatest()">Subir datos de este dispositivo</button></div>','Sincronización pendiente')}
+async function saveCloud(){
+ if(!cloudActive||!cloudUser||cloudSaving)return;clearTimeout(cloudTimer);cloudTimer=null;cloudSaving=true;let tries=0;
+ try{
+  while(tries<8&&cloudActive&&cloudUser){
+   const body=JSON.parse(JSON.stringify(normalizeCloudPayload(data))),expected=cloudVersion;cloudStatus('Guardando…');
+   let {data:v,error}=await cloudClient.rpc('save_el_shaddai_data',{p_payload:body,p_expected_updated_at:expected});
+   if(error&&String(error.message||'').includes('SYNC_CONFLICT')){
+    let {data:latest,error:readError}=await readCloud();if(readError)throw readError;
+    const remote=normalizeCloudPayload(latest?.payload||{}),base=cloudSnapshot?.payload||readCloudBase()?.payload||{};
+    if(!saveRecoveryCopy('conflicto-local',data)||!saveRecoveryCopy('conflicto-nube',remote))throw Error('No se pudieron preparar copias para combinar');
+    data=mergeCloudPayload(base,data,remote);localStorage.setItem(KEY,JSON.stringify(data));cloudSnapshot=latest;cloudVersion=latest?.updated_at||null;cloudDirty=!cloudEqual(data,remote);render();tries++;if(!cloudDirty){saveCloudBase(remote,cloudVersion);cloudStatus('Sincronizado',true);return}continue
+   }
+   if(error)throw error;
+   cloudVersion=v;cloudSnapshot={payload:body,updated_at:v};cloudDirty=!cloudEqual(data,body);saveCloudBase(body,v);
+   if(cloudDirty){cloudStatus('Guardando cambios…');scheduleCloudSave(500)}else cloudStatus('Sincronizado',true);
+   return
+  }
+  if(cloudDirty){cloudStatus('Pendiente · reintentando');scheduleCloudSave(3000)}
+ }catch(error){cloudDirty=true;cloudStatus('Pendiente · se reintentará');scheduleCloudSave(15000)}
  finally{cloudSaving=false}
 }
-async function refreshCloud(){if(!cloudUser||cloudSaving)return;let {data:row,error}=await readCloud();if(error){cloudStatus('Sin conexión');return}if(!row){await loadCloudForUser();return}if(row.updated_at===cloudVersion)return;
- if(cloudDirty){data=mergeCloudPayload(cloudSnapshot?.payload||{},data,row.payload||{});localStorage.setItem(KEY,JSON.stringify(data));cloudSnapshot=row;cloudVersion=row.updated_at;render();clearTimeout(cloudTimer);cloudTimer=setTimeout(saveCloud,300);return}
+async function refreshCloud(){
+ if(!cloudUser||cloudSaving||cloudLoading)return;if(!cloudActive){await loadCloudForUser();return}
+ let {data:row,error}=await readCloud();if(error){cloudStatus('Pendiente · sin conexión');if(cloudDirty&&!cloudTimer)scheduleCloudSave(5000);return}
+ if(!row){await loadCloudForUser();return}
+ if(row.updated_at===cloudVersion){if(cloudDirty&&!cloudTimer)scheduleCloudSave(500);return}
+ if(cloudDirty){const local=normalizeCloudPayload(data),remote=normalizeCloudPayload(row.payload),base=cloudSnapshot?.payload||readCloudBase()?.payload||{};if(!saveRecoveryCopy('conflicto-local',local)||!saveRecoveryCopy('conflicto-nube',remote)){cloudStatus('Pendiente · conservar copias');return}data=mergeCloudPayload(base,local,remote);localStorage.setItem(KEY,JSON.stringify(data));cloudSnapshot=row;cloudVersion=row.updated_at;cloudDirty=!cloudEqual(data,remote);render();if(cloudDirty){cloudStatus('Combinando dispositivos…');scheduleCloudSave(150)}else{saveCloudBase(remote,row.updated_at);cloudStatus('Sincronizado',true)}return}
  usePayload(row.payload,row.updated_at);closeAccount()
 }
-async function signOutCloud(){await cloudClient.auth.signOut();cloudUser=null;cloudActive=false;cloudVersion=null;cloudDirty=false;cloudStatus('Sincronizar');closeAccount()}
-async function initCloud(){try{if(!window.supabase?.createClient)throw Error();let recoveryLink=new URLSearchParams(location.hash.slice(1)).get('type')==='recovery';cloudClient=window.supabase.createClient(CLOUD_URL,CLOUD_KEY);cloudClient.auth.onAuthStateChange((event,session)=>{if(event==='PASSWORD_RECOVERY'){cloudUser=session?.user||null;showPasswordRecovery()}else if(event==='SIGNED_OUT'){cloudUser=null;cloudActive=false;cloudVersion=null;cloudStatus('Sincronizar')}else if(event==='SIGNED_IN'&&session?.user&&!cloudUser){cloudUser=session.user;loadCloudForUser()}});let {data:s}=await cloudClient.auth.getSession();cloudUser=s.session?.user||null;if(recoveryLink)showPasswordRecovery();else if(cloudUser)await loadCloudForUser();else cloudStatus('Sincronizar')}catch{cloudStatus('Error de conexión')}}
-document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&cloudUser&&cloudActive)refreshCloud()});window.addEventListener('focus',()=>{if(cloudUser&&cloudActive)refreshCloud()});cloudPolling=setInterval(()=>{if(document.visibilityState==='visible'&&cloudUser&&cloudActive)refreshCloud()},10000);
+async function signOutCloud(){clearTimeout(cloudTimer);await cloudClient.auth.signOut();cloudUser=null;cloudActive=false;cloudVersion=null;cloudDirty=false;cloudLoading=false;cloudSnapshot=null;cloudStatus('Sincronizar');closeAccount()}
+async function initCloud(){try{if(!window.supabase?.createClient)throw Error();let recoveryLink=new URLSearchParams(location.hash.slice(1)).get('type')==='recovery';cloudClient=window.supabase.createClient(CLOUD_URL,CLOUD_KEY);cloudClient.auth.onAuthStateChange((event,session)=>{if(event==='PASSWORD_RECOVERY'){cloudUser=session?.user||null;showPasswordRecovery()}else if(event==='SIGNED_OUT'){cloudUser=null;cloudActive=false;cloudDirty=false;cloudLoading=false;cloudVersion=null;cloudSnapshot=null;clearTimeout(cloudTimer);cloudStatus('Sincronizar')}else if(event==='SIGNED_IN'&&session?.user){cloudUser=session.user;setTimeout(()=>{if(cloudUser?.id===session.user.id)loadCloudForUser()},0)}});let {data:s}=await cloudClient.auth.getSession();cloudUser=s.session?.user||null;if(recoveryLink)showPasswordRecovery();else if(cloudUser)await loadCloudForUser();else cloudStatus('Sincronizar')}catch{cloudStatus('Error de conexión')}}
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&cloudUser){if(cloudActive)refreshCloud();else loadCloudForUser()}});window.addEventListener('focus',()=>{if(cloudUser){if(cloudActive)refreshCloud();else loadCloudForUser()}});cloudPolling=setInterval(()=>{if(document.visibilityState==='visible'&&cloudUser){if(cloudActive)refreshCloud();else loadCloudForUser()}},10000);
 initCloud();
 </script><script>let installPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installPrompt=e;let b=document.getElementById('installApp');if(b)b.style.display='inline-block'});async function installPWA(){if(!installPrompt)return;installPrompt.prompt();await installPrompt.userChoice;installPrompt=null;let b=document.getElementById('installApp');if(b)b.style.display='none'}if('serviceWorker'in navigator&&/^https?:$/.test(location.protocol))navigator.serviceWorker.register('./sw.js').catch(()=>{});</script></body></html>
 

@@ -160,7 +160,7 @@ function renderMovements(){if(!document.getElementById('movementsTable'))return;
 migrateReceivables();render();
 </script><script>
 const CLOUD_URL='https://yezqyvksayrehivzvxqn.supabase.co',CLOUD_KEY='sb_publishable_ow6ZF5M21-IZ0FgPRqIktA_bUUNlONq';
-let cloudClient=null,cloudVersion=null,cloudActive=false,cloudDirty=false,cloudTimer=null,cloudUser=null,cloudSnapshot=null,cloudSaving=false,cloudLoading=false,cloudPolling=null;
+let cloudClient=null,cloudVersion=null,cloudActive=false,cloudDirty=false,cloudTimer=null,cloudUser=null,cloudSnapshot=null,cloudSaving=false,cloudLoading=false,cloudLoadGeneration=0,cloudPolling=null;
 function cloudStatus(t,on=false){let b=document.getElementById('accountButton');if(b){b.textContent=t;b.classList.toggle('connected',on)}}
 function accountBody(h,t){document.getElementById('accountTitle').textContent=t||'Sincronizar dispositivos';document.getElementById('accountBody').innerHTML=h;document.getElementById('accountModal').classList.add('show')}
 function closeAccount(){document.getElementById('accountModal').classList.remove('show')}
@@ -194,9 +194,10 @@ function saveCloudBase(p,v){if(!cloudUser)return;try{const x=normalizeCloudPaylo
 function saveRecoveryCopy(label,p){const key=KEY+'-recuperacion-'+label;try{localStorage.setItem(key,JSON.stringify(p));return true}catch{try{const strip=value=>Array.isArray(value)?value.map(strip):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).filter(([name])=>name!=='image').map(([name,item])=>[name,strip(item)])):value;localStorage.setItem(key,JSON.stringify(strip(p)));return true}catch{return false}}}
 function usePayload(p,v){const x=normalizeCloudPayload(p);data=x;localStorage.setItem(KEY,JSON.stringify(data));cloudVersion=v;cloudSnapshot={payload:JSON.parse(JSON.stringify(data)),updated_at:v};cloudDirty=false;cloudActive=true;saveCloudBase(data,v);render();cloudStatus('Sincronizado',true)}
 async function loadCloudForUser(){
- if(!cloudUser||cloudLoading)return;cloudLoading=true;cloudStatus('Conectando…');
+ if(!cloudUser||cloudLoading)return;cloudLoading=true;const attempt=++cloudLoadGeneration;cloudStatus('Conectando…');
+ const watchdog=setTimeout(()=>{if(attempt!==cloudLoadGeneration||!cloudLoading)return;cloudLoading=false;cloudLoadGeneration++;cloudActive=false;cloudDirty=localHasRecords();cloudStatus('Sin respuesta');accountBody('<p class="account-note">La notebook no recibió respuesta de la nube. Tus datos locales siguen guardados. Revisá la conexión e intentá conectar nuevamente.</p><div class="account-actions"><button class="btn" onclick="closeAccount()">Cerrar</button><button class="btn primary" onclick="loadCloudForUser()">Reintentar conexión</button></div>','Conexión pendiente')},18000);
  try{
-  let {data:row,error}=await readCloud();
+  let {data:row,error}=await readCloud();if(attempt!==cloudLoadGeneration)return;
   if(error){cloudActive=false;cloudDirty=localHasRecords();cloudStatus('Pendiente de conexión');scheduleCloudSave(15000);return}
   if(!row){cloudSnapshot=null;cloudVersion=null;cloudActive=true;cloudDirty=true;closeAccount();scheduleCloudSave(200);return}
   const remote=normalizeCloudPayload(row.payload),local=normalizeCloudPayload(data);cloudSnapshot=row;cloudVersion=row.updated_at;
@@ -205,8 +206,8 @@ async function loadCloudForUser(){
   if(!localBackup||!cloudBackup){cloudActive=false;cloudStatus('Revisar copias');accountBody('<p class="account-note">Encontré datos distintos en la notebook y en la nube, pero no hay espacio suficiente para guardar copias de recuperación en este dispositivo. No reemplacé ninguna de las dos copias.</p><div class="account-actions"><button class="btn" onclick="closeAccount()">Dejar así</button><button class="btn" onclick="useCloud()">Usar datos de la nube</button><button class="btn primary" onclick="uploadLocal()">Subir datos locales</button></div>','Conservar información');return}
   const base=readCloudBase()?.payload||{};data=mergeCloudPayload(base,local,remote);localStorage.setItem(KEY,JSON.stringify(data));cloudSnapshot=row;cloudVersion=row.updated_at;cloudActive=true;cloudDirty=!cloudEqual(data,remote);render();closeAccount();
   if(cloudDirty){cloudStatus('Combinando dispositivos…');scheduleCloudSave(150)}else{saveCloudBase(remote,row.updated_at);cloudStatus('Sincronizado',true)}
- }catch(error){cloudActive=false;cloudDirty=localHasRecords();cloudStatus('Pendiente de conexión');scheduleCloudSave(15000)}
- finally{cloudLoading=false}
+ }catch(error){if(attempt===cloudLoadGeneration){cloudActive=false;cloudDirty=localHasRecords();cloudStatus('Pendiente de conexión');scheduleCloudSave(15000)}}
+ finally{clearTimeout(watchdog);if(attempt===cloudLoadGeneration)cloudLoading=false}
 }
 function useCloud(){const row=cloudSnapshot;if(!row||!row.payload){loadCloudForUser();return}saveRecoveryCopy('local',data);usePayload(row.payload,row.updated_at);closeAccount();toast('Datos de la nube cargados')}
 async function uploadLocal(){if(!cloudUser)return;cloudVersion=cloudSnapshot?.updated_at||null;cloudActive=true;cloudDirty=true;closeAccount();await saveCloud()}
@@ -271,7 +272,7 @@ async function refreshCloud(){
  usePayload(row.payload,row.updated_at);closeAccount()
 }
 async function signOutCloud(){clearTimeout(cloudTimer);await cloudClient.auth.signOut();cloudUser=null;cloudActive=false;cloudVersion=null;cloudDirty=false;cloudLoading=false;cloudSnapshot=null;cloudStatus('Sincronizar');closeAccount()}
-async function initCloud(){try{if(!window.supabase?.createClient)throw Error();let recoveryLink=new URLSearchParams(location.hash.slice(1)).get('type')==='recovery';cloudClient=window.supabase.createClient(CLOUD_URL,CLOUD_KEY);cloudClient.auth.onAuthStateChange((event,session)=>{if(event==='PASSWORD_RECOVERY'){cloudUser=session?.user||null;showPasswordRecovery()}else if(event==='SIGNED_OUT'){cloudUser=null;cloudActive=false;cloudDirty=false;cloudLoading=false;cloudVersion=null;cloudSnapshot=null;clearTimeout(cloudTimer);cloudStatus('Sincronizar')}else if(event==='SIGNED_IN'&&session?.user){cloudUser=session.user;setTimeout(()=>{if(cloudUser?.id===session.user.id)loadCloudForUser()},0)}});let {data:s}=await cloudClient.auth.getSession();cloudUser=s.session?.user||null;if(recoveryLink)showPasswordRecovery();else if(cloudUser)await loadCloudForUser();else cloudStatus('Sincronizar')}catch{cloudStatus('Error de conexión')}}
+async function initCloud(){try{if(!window.supabase?.createClient)throw Error();let recoveryLink=new URLSearchParams(location.hash.slice(1)).get('type')==='recovery';cloudClient=window.supabase.createClient(CLOUD_URL,CLOUD_KEY);cloudClient.auth.onAuthStateChange((event,session)=>{if(event==='PASSWORD_RECOVERY'){cloudUser=session?.user||null;showPasswordRecovery()}else if(event==='SIGNED_OUT'){cloudUser=null;cloudActive=false;cloudDirty=false;cloudLoading=false;cloudLoadGeneration++;cloudVersion=null;cloudSnapshot=null;clearTimeout(cloudTimer);cloudStatus('Sincronizar')}else if(event==='SIGNED_IN'&&session?.user){cloudUser=session.user;setTimeout(()=>{if(cloudUser?.id===session.user.id)loadCloudForUser()},0)}});let {data:s}=await cloudClient.auth.getSession();cloudUser=s.session?.user||null;if(recoveryLink)showPasswordRecovery();else if(cloudUser)await loadCloudForUser();else cloudStatus('Sincronizar')}catch{cloudStatus('Error de conexión')}}
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&cloudUser){if(cloudActive)refreshCloud();else loadCloudForUser()}});window.addEventListener('focus',()=>{if(cloudUser){if(cloudActive)refreshCloud();else loadCloudForUser()}});cloudPolling=setInterval(()=>{if(document.visibilityState==='visible'&&cloudUser){if(cloudActive)refreshCloud();else loadCloudForUser()}},10000);
 initCloud();
 </script><script>let installPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();installPrompt=e;let b=document.getElementById('installApp');if(b)b.style.display='inline-block'});async function installPWA(){if(!installPrompt)return;installPrompt.prompt();await installPrompt.userChoice;installPrompt=null;let b=document.getElementById('installApp');if(b)b.style.display='none'}if('serviceWorker'in navigator&&/^https?:$/.test(location.protocol))navigator.serviceWorker.register('./sw.js').catch(()=>{});</script></body></html>

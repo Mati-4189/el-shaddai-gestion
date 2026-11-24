@@ -211,7 +211,7 @@ async function loadCloudForUser(){
   const base=readCloudBase()?.payload||{};data=mergeCloudPayload(base,local,remote);localStorage.setItem(KEY,JSON.stringify(data));cloudSnapshot=row;cloudVersion=row.updated_at;cloudActive=true;cloudDirty=!cloudEqual(data,remote);render();closeAccount();
   if(cloudDirty){cloudStatus('Combinando dispositivos…');scheduleCloudSave(150)}else{saveCloudBase(remote,row.updated_at);cloudStatus('Sincronizado',true)}
  }catch(error){if(attempt===cloudLoadGeneration){cloudActive=false;cloudDirty=localHasRecords();cloudLastError=String(error?.message||error||'Error de conexión');cloudStatus('Sin conexión');accountBody('<p class="account-note">No se pudo completar la lectura de la nube. Tus datos locales se conservan.</p><p class="account-note">'+escCloud(cloudLastError)+'</p><div class="account-actions"><button class="btn" onclick="closeAccount()">Cerrar</button><button class="btn primary" onclick="retryCloudConnection()">Reintentar ahora</button></div>','Conexión pausada');scheduleCloudRetry()}}
- finally{clearTimeout(watchdog);if(attempt===cloudLoadGeneration)cloudLoading=false}
+ finally{clearTimeout(watchdog);if(attempt===cloudLoadGeneration){cloudLoading=false;clearTimeout(cloudRetryUiTimer);cloudRetryUiTimer=null;cloudRetryUiPending=false;cloudRetryUiToken++}}
 }
 function useCloud(){const row=cloudSnapshot;if(!row||!row.payload){loadCloudForUser();return}saveRecoveryCopy('local',data);usePayload(row.payload,row.updated_at);closeAccount();toast('Datos de la nube cargados')}
 async function uploadLocal(){if(!cloudUser)return;cloudVersion=cloudSnapshot?.updated_at||null;cloudActive=true;cloudDirty=true;closeAccount();await saveCloud()}
